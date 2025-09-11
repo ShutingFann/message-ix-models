@@ -55,8 +55,8 @@ tech_list = [
 ]
 
 # Specify scenario
-wacc_scenario, ssp = "cf_fair_f10", "SSP4"
-model_ori = "SSP_SSP4_v5.3.1" # latest version "SSP_SSP2_v6.1"
+wacc_scenario, ssp = "Low_ICF_His", "SSP2"
+model_ori = "SSP_SSP2_v5.3.1" # latest version "SSP_SSP2_v6.1"
 scen_ori = "baseline_1000f" # latest version "SSP2 - Low Emissions"
 model_tgt = "MESSAGEix-GLOBIOM 2.0-M-R12 Investment"
 # scen_tgt = "baseline_ssp6.1_low_base"
@@ -72,46 +72,103 @@ folder_path = package_data_path("investment")
 inv_cost.to_csv(os.path.join(str(folder_path), "inv_cost_ori.csv"), index=False)
 
 # Function that generate new inv_cost # Dummy
-def gene_coc(): # type: ignore
-    try:
-        inv_cost_ori = pd.read_csv(package_data_path("investment", "inv_cost_ori.csv"))
-    except:
-        log.info("Original inv_cost not found.")
-        pass
-    
-    # Approach 1: a fixed share (e.g., A%) in the baseline year as financing cost, 
-    # A%*inv_cost_0 following the long-term projection of financing cost, 
-    # (1-A%)*inv_cost_0 following the tech progress rate (Meas tool)
+def gene_coc(
+    ssp: str = "SSP2",
+    wacc_scenario: str = "Baseline",
+    baseline_year: int = 2020,
+    A_default: float = 0.10,
+    wacc_csv_path: str = "message-ix-models/message_ix_models/project/investment/Predicted_WACC_All_SSPs_8_mean.csv",
+    inv_cost_filename: str = "inv_cost_ori.csv",
+    out_filename: str = "inv_cost.csv",
+    category_map_override: dict | None = None,
+) -> None:
+    """
+    Generate investment cost file (inv_cost.csv) with CoC decomposition.
+    """
 
-    # Dummy A% as 10%
-    A = 0.1
+    def map_category(tech: str) -> str:
+        """Map technology name to category."""
+        if tech.startswith("solar_") or tech.startswith("csp_"):
+            return "solar"
+        elif tech.startswith("wind_"):
+            return "wind"
+        elif tech.startswith("bio_"):
+            return "bio"
+        elif tech.startswith("hydro_"):
+            return "hydro"
+        if category_map_override:
+            for prefix, cat in category_map_override.items():
+                if tech.startswith(prefix):
+                    return cat
+        return tech
 
-    inv_cost = inv_cost_ori[inv_cost_ori["year_vtg"] >= 2020].copy()
-    # mask_2020 = inv_cost["year_vtg"] == 2020
-    # inv_cost["coc_base"] = 0.0
-    # inv_cost["non_coc_base"] = 0.0
-    # inv_cost.loc[mask_2020, "coc_base"] = inv_cost.loc[mask_2020, "value"] * A
-    # coc_base_2020 = inv_cost.loc[mask_2020].set_index(["node_loc", "technology"])["coc_base"]
-    # inv_cost.loc[~mask_2020, "coc_base"] = inv_cost.loc[~mask_2020].set_index(["node_loc", "technology"]).index.map(coc_base_2020)
-    
-    # inv_cost["non_coc_base"] = inv_cost["value"] - inv_cost["coc_base"]
-    # non_coc_base_2020 = (
-    #     inv_cost[mask_2020]
-    #     .set_index(["node_loc", "technology"])["non_coc_base"] # type: ignore
-    # )
-    # inv_cost["non_coc_base_2020"] = inv_cost.set_index(["node_loc", "technology"]).index.map(non_coc_base_2020)
-    # inv_cost["non_coc_base_growth"] = (
-    #     inv_cost["non_coc_base"] / inv_cost["non_coc_base_2020"]
-    # )
-
-    # Then try different approaches with coc and non_coc, and refill value
-
-    # Output
-    columns_to_keep = ['node_loc', 'technology', 'year_vtg', 'value', 'unit'] # specify the dimensions of the output
-    inv_cost_out = inv_cost[columns_to_keep]
-
+    # 1. Load original investment cost data
     folder_path = package_data_path("investment")
-    inv_cost_out.to_csv(os.path.join(str(folder_path), "inv_cost.csv"), index=False) # type: ignore
+    inv_cost_ori = pd.read_csv(os.path.join(folder_path, inv_cost_filename))
+    inv_cost = inv_cost_ori[inv_cost_ori["year_vtg"] >= baseline_year].copy()
+
+    # 2. Load and filter WACC data
+    wacc = pd.read_csv(wacc_csv_path)
+    wacc = wacc[
+        (wacc["Scenario"] == wacc_scenario) &
+        (wacc["SSP"] == ssp)
+    ].copy()
+    wacc = wacc.rename(columns={
+        "Region": "node_loc",
+        "Year": "year_vtg",
+        "Tech": "category",
+        "WACC": "A"
+    })
+
+    # 3. Map technology to category and merge
+    inv_cost = inv_cost.rename(columns={"technology": "technology_ori"})
+    inv_cost["category"] = inv_cost["technology_ori"].apply(map_category)
+    inv_cost = inv_cost.merge(
+        wacc[["node_loc", "year_vtg", "category", "A"]],
+        on=["node_loc", "year_vtg", "category"],
+        how="left"
+    )
+
+    # 4. Fill missing WACC and compute CoC/non-CoC
+    inv_cost["A"] = inv_cost["A"].fillna(A_default)
+    inv_cost["coc_base"] = inv_cost["value"] * inv_cost["A"]
+    inv_cost["non_coc_base"] = inv_cost["value"] - inv_cost["coc_base"]
+
+    # 5. Restore original technology column
+    inv_cost["technology"] = inv_cost["technology_ori"]
+    inv_cost = inv_cost.drop(columns=["technology_ori", "category"], errors="ignore")
+
+    # 6. Sort and compute growth
+    inv_cost = inv_cost.sort_values(["node_loc", "technology", "year_vtg"]).copy()
+    inv_cost["value_growth"] = (
+        inv_cost
+        .groupby(["node_loc", "technology"])["value"]
+        .transform(lambda x: x.div(x.shift(1)))
+        .fillna(1.0)
+    )
+    inv_cost["non_coc_base0"] = (
+        inv_cost
+        .groupby(["node_loc", "technology"])["non_coc_base"]
+        .transform("first")
+    )
+    inv_cost["cum_growth"] = (
+        inv_cost
+        .groupby(["node_loc", "technology"])["value_growth"]
+        .cumprod()
+    )
+
+    # 7. Recalculate non-CoC and total value
+    inv_cost["non_coc_new"] = inv_cost["non_coc_base0"] * inv_cost["cum_growth"]
+    inv_cost["value"] = inv_cost["non_coc_new"] / (1.0 - inv_cost["A"])
+    inv_cost["coc_base"] = inv_cost["value"] * inv_cost["A"]
+
+    # 8. Save final output
+    cols = [
+        "node_loc", "technology", "year_vtg", "value",
+        "unit", "coc_base", "non_coc_base"
+    ]
+    out = inv_cost[cols]
+    out.to_csv(os.path.join(str(folder_path), out_filename), index=False)
 
 # Function that implements new CoC (read inv_cost)
 def imple_coc(scen):
@@ -151,7 +208,7 @@ scen.set_as_default()
 log.info("Scenario cloned.")
 
 # Generate new parameters
-gene_coc()
+gene_coc(ssp=ssp, wacc_scenario=wacc_scenario)
 
 # Apply scenario settings
 imple_coc(scen)
