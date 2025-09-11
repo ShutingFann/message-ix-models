@@ -5,7 +5,7 @@ import ixmp # type: ignore
 import logging
 import sys
 
-mp = ixmp.Platform()
+mp = ixmp.Platform("ixmp_dev", jvmargs = ["-Xmx16G"])
 from pathlib import Path
 from message_ix_models.util import package_data_path
 
@@ -55,10 +55,12 @@ tech_list = [
 ]
 
 # Specify scenario
-model_ori = "SSP_SSP2_v6.1" # latest version "SSP_SSP2_v6.1"
-scen_ori = "SSP2 - Low Emissions" # latest version "SSP2 - Low Emissions"
+wacc_scenario, ssp = "cf_fair_f10", "SSP4"
+model_ori = "SSP_SSP4_v5.3.1" # latest version "SSP_SSP2_v6.1"
+scen_ori = "baseline_1000f" # latest version "SSP2 - Low Emissions"
 model_tgt = "MESSAGEix-GLOBIOM 2.0-M-R12 Investment"
-scen_tgt = "baseline_ssp6.1_low_base"
+# scen_tgt = "baseline_ssp6.1_low_base"
+scen_tgt = f"{wacc_scenario}_{ssp}"
 
 # Load scenario
 base = message_ix.Scenario(mp, model=model_ori, scenario=scen_ori)
